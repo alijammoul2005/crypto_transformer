@@ -1,0 +1,31 @@
+# PyTorch - Deep learning framework
+torch>=2.0.0
+
+# HuggingFace Datasets - For WikiText-103
+datasets>=2.14.0
+
+# Transformers library (for utilities, not the model itself)
+transformers>=4.30.0
+
+# NLTK - For BLEU score calculation
+nltk>=3.8.0
+
+# Python-Levenshtein - For edit distance calculation
+python-Levenshtein>=0.21.0
+
+# NumPy - Numerical computing
+numpy>=1.24.0
+
+# tqdm - Progress bars
+tqdm>=4.65.0
+
+# Matplotlib - Plotting training curves
+matplotlib>=3.7.0
+
+# Standard library (no installation needed, listed for reference)
+# json
+# random
+# re
+# pathlib
+# sys
+# os
