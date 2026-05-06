@@ -39,15 +39,17 @@ Built from scratch following "Attention is All You Need" (Vaswani et al., 2017):
 - Output projection to vocabulary
 
 **Hyperparameters:**
-- d_model = 256
+- d_model = 512
 - num_heads = 8
-- num_layers = 4
-- d_ff = 512
+- num_layers = 6
+- d_ff = 1024
 - dropout = 0.1
 - vocab_size = 30 (a-z + space + SOS + EOS + PAD)
 - max_len = 202
+- warmup_steps = 2000
+- label_smoothing = 0.1
 
-**Total Parameters:** ~3.5M trainable parameters
+**Total Parameters:** ~14M trainable parameters
 
 ## Project Structure
 

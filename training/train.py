@@ -36,11 +36,11 @@ if torch.cuda.is_available():
 # Hyperparameters
 BATCH_SIZE = 32
 MAX_EPOCHS = 20
-WARMUP_STEPS = 4000
-D_MODEL = 256
+WARMUP_STEPS = 2000  # Reduced from 4000 for faster warmup
+D_MODEL = 512  # Increased from 256 for more capacity
 NUM_HEADS = 8
-NUM_LAYERS = 4
-D_FF = 512
+NUM_LAYERS = 6  # Increased from 4 for deeper model
+D_FF = 1024  # Increased from 512
 DROPOUT = 0.1
 MAX_LEN = 202
 EARLY_STOPPING_PATIENCE = 3
@@ -320,8 +320,8 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
     scheduler = WarmupScheduler(optimizer, D_MODEL, WARMUP_STEPS)
 
-    # Loss function (ignore PAD tokens)
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+    # Loss function (ignore PAD tokens, add label smoothing for better generalization)
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, label_smoothing=0.1)
 
     # Training loop
     print("\n" + "="*80)
