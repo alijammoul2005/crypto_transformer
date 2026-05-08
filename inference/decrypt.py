@@ -26,14 +26,15 @@ from evaluation.metrics import calculate_all_metrics
 random.seed(42)
 torch.manual_seed(42)
 
-# Paths
-CHECKPOINT_PATH = Path("/kaggle/working/checkpoints/best_model.pt")
+# Paths - use relative paths for local execution
+SCRIPT_DIR = Path(__file__).parent.parent
+CHECKPOINT_PATH = SCRIPT_DIR / "checkpoints" / "best_model.pt"
 
-# Model hyperparameters
-D_MODEL = 256
+# Model hyperparameters (must match training config)
+D_MODEL = 512
 NUM_HEADS = 8
-NUM_LAYERS = 4
-D_FF = 512
+NUM_LAYERS = 6
+D_FF = 2048
 MAX_LEN = 202
 DROPOUT = 0.1
 VOCAB_SIZE = 30

@@ -21,7 +21,9 @@ TRAIN_SIZE = 300000
 VAL_SIZE = 25000
 TEST_SIZE = 25000
 CHUNK_SIZE = 200
-OUTPUT_DIR = Path("/kaggle/working/data")
+# Use relative path for local data generation
+SCRIPT_DIR = Path(__file__).parent
+OUTPUT_DIR = SCRIPT_DIR / "generated"
 
 
 def clean_text(text):

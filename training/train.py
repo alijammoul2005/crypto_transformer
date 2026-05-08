@@ -34,20 +34,21 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 
 # Hyperparameters
-BATCH_SIZE = 32
+BATCH_SIZE = 256
 MAX_EPOCHS = 20
-WARMUP_STEPS = 2000  # Reduced from 4000 for faster warmup
+WARMUP_STEPS = 4000  # Larger batch size needs longer warmup
 D_MODEL = 512  # Increased from 256 for more capacity
 NUM_HEADS = 8
 NUM_LAYERS = 6  # Increased from 4 for deeper model
-D_FF = 1024  # Increased from 512
+D_FF = 2048  # Increased for better GPU utilization
 DROPOUT = 0.1
 MAX_LEN = 202
 EARLY_STOPPING_PATIENCE = 3
 
-# Paths
-DATA_DIR = Path("/kaggle/working/data")
-CHECKPOINT_DIR = Path("/kaggle/working/checkpoints")
+# Paths - use relative paths for local training
+SCRIPT_DIR = Path(__file__).parent.parent  # crypto_transformer directory
+DATA_DIR = SCRIPT_DIR / "data" / "generated"
+CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -185,7 +186,12 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, pad_
         if (batch_idx + 1) % 100 == 0:
             avg_loss = total_loss / num_batches
             avg_acc = total_accuracy / num_batches
-            print(f"  Step {batch_idx + 1}: loss={avg_loss:.4f}, acc={avg_acc:.2f}%, lr={scheduler.get_lr():.6f}")
+            print(f"  Step {batch_idx + 1}: loss={avg_loss:.4f}, acc={avg_acc:.2f}%, lr={scheduler.get_lr():.6f}", flush=True)
+
+        # Print GPU memory stats after first training step
+        if batch_idx == 0 and epoch == 1 and torch.cuda.is_available():
+            print(f"  After first step - Memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB", flush=True)
+            print(f"  After first step - Memory reserved:  {torch.cuda.memory_reserved()/1e9:.2f} GB", flush=True)
 
     return total_loss / num_batches, total_accuracy / num_batches
 
@@ -259,51 +265,53 @@ def plot_training_curves(train_losses, val_losses, save_path):
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Training curves saved to {save_path}")
+    print(f"Training curves saved to {save_path}", flush=True)
 
 
 def main():
     """
     Main training function.
     """
-    print("="*80)
-    print("TRANSFORMER TRAINING FOR SUBSTITUTION CIPHER CRYPTANALYSIS")
-    print("="*80)
+    print("="*80, flush=True)
+    print("TRANSFORMER TRAINING FOR SUBSTITUTION CIPHER CRYPTANALYSIS", flush=True)
+    print("="*80, flush=True)
 
     # Check GPU availability
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nDevice: {device}")
+    print(f"\nDevice: {device}", flush=True)
     if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA available: {torch.cuda.is_available()}")
-    print()
+        print(f"GPUs available: {torch.cuda.device_count()}", flush=True)
+        print(f"GPU 0: {torch.cuda.get_device_name(0)}", flush=True)
+        print(f"Memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB", flush=True)
+        print(f"Memory reserved:  {torch.cuda.memory_reserved()/1e9:.2f} GB", flush=True)
+    print(flush=True)
 
     # Load datasets
-    print("Loading datasets...")
+    print("Loading datasets...", flush=True)
     train_dataset = CipherDataset(DATA_DIR / "train.json", max_len=MAX_LEN)
     val_dataset = CipherDataset(DATA_DIR / "val.json", max_len=MAX_LEN)
 
     vocab_size = train_dataset.vocab_size
     pad_idx = train_dataset.PAD_IDX
 
-    print(f"Training samples: {len(train_dataset)}")
-    print(f"Validation samples: {len(val_dataset)}")
-    print(f"Vocabulary size: {vocab_size}")
-    print(f"PAD_IDX: {pad_idx}")
+    print(f"Training samples: {len(train_dataset)}", flush=True)
+    print(f"Validation samples: {len(val_dataset)}", flush=True)
+    print(f"Vocabulary size: {vocab_size}", flush=True)
+    print(f"PAD_IDX: {pad_idx}", flush=True)
 
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
-    print(f"Training batches: {len(train_loader)}")
-    print(f"Validation batches: {len(val_loader)}")
+    print(f"Training batches: {len(train_loader)}", flush=True)
+    print(f"Validation batches: {len(val_loader)}", flush=True)
 
     # Clear GPU cache
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     # Create model
-    print("\nInitializing model...")
+    print("\nInitializing model...", flush=True)
     model = CryptoTransformer(
         vocab_size=vocab_size,
         d_model=D_MODEL,
@@ -312,31 +320,53 @@ def main():
         d_ff=D_FF,
         max_len=MAX_LEN,
         dropout=DROPOUT
-    ).to(device)
+    )
 
-    print(f"Total parameters: {model.count_parameters():,}")
-
-    # Create optimizer and scheduler
+    # Create optimizer (before loading checkpoint)
     optimizer = optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
     scheduler = WarmupScheduler(optimizer, D_MODEL, WARMUP_STEPS)
+
+    # Check for existing checkpoint to resume from
+    resume_checkpoint = CHECKPOINT_DIR / "best_model.pt"
+    start_epoch = 1
+    best_val_loss = float('inf')
+    if resume_checkpoint.exists():
+        print(f"Found checkpoint: {resume_checkpoint}", flush=True)
+        print("Loading checkpoint...", flush=True)
+        checkpoint = torch.load(resume_checkpoint, map_location='cpu')
+
+        # Load state dict into model BEFORE wrapping with DataParallel
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_loss = checkpoint['val_loss']
+
+        print(f"Resumed from epoch {checkpoint['epoch']}, best val_loss: {best_val_loss:.4f}", flush=True)
+
+    # Enable multi-GPU if available (AFTER loading checkpoint)
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs", flush=True)
+        model = nn.DataParallel(model)
+    model = model.to(device)
+
+    print(f"Total parameters: {model.module.count_parameters() if isinstance(model, nn.DataParallel) else model.count_parameters():,}", flush=True)
 
     # Loss function (ignore PAD tokens, add label smoothing for better generalization)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, label_smoothing=0.1)
 
     # Training loop
-    print("\n" + "="*80)
-    print("STARTING TRAINING")
-    print("="*80)
+    print("\n" + "="*80, flush=True)
+    print("STARTING TRAINING", flush=True)
+    print("="*80, flush=True)
 
-    best_val_loss = float('inf')
     epochs_without_improvement = 0
     train_losses = []
     val_losses = []
 
-    for epoch in range(1, MAX_EPOCHS + 1):
-        print(f"\n{'='*80}")
-        print(f"EPOCH {epoch}/{MAX_EPOCHS}")
-        print(f"{'='*80}")
+    for epoch in range(start_epoch, MAX_EPOCHS + 1):
+        print(f"\n{'='*80}", flush=True)
+        print(f"EPOCH {epoch}/{MAX_EPOCHS}", flush=True)
+        print(f"{'='*80}", flush=True)
 
         # Train
         train_loss, train_acc = train_epoch(
@@ -351,9 +381,9 @@ def main():
         val_losses.append(val_loss)
 
         # Print epoch summary
-        print(f"\nEpoch {epoch} Summary:")
-        print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-        print(f"  Val Loss:   {val_loss:.4f}, Val Acc:   {val_acc:.2f}%")
+        print(f"\nEpoch {epoch} Summary:", flush=True)
+        print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%", flush=True)
+        print(f"  Val Loss:   {val_loss:.4f}, Val Acc:   {val_acc:.2f}%", flush=True)
 
         # Save best model
         if val_loss < best_val_loss:
@@ -363,21 +393,21 @@ def main():
             checkpoint_path = CHECKPOINT_DIR / "best_model.pt"
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'val_accuracy': val_acc,
             }, checkpoint_path)
-            print(f"  ✓ Best model saved (val_loss: {val_loss:.4f})")
+            print(f"  ✓ Best model saved (val_loss: {val_loss:.4f})", flush=True)
 
         else:
             epochs_without_improvement += 1
-            print(f"  No improvement for {epochs_without_improvement} epoch(s)")
+            print(f"  No improvement for {epochs_without_improvement} epoch(s)", flush=True)
 
             # Early stopping
             if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
-                print(f"\nEarly stopping triggered after {epoch} epochs")
+                print(f"\nEarly stopping triggered after {epoch} epochs", flush=True)
                 break
 
         # Clear GPU cache
@@ -385,13 +415,13 @@ def main():
             torch.cuda.empty_cache()
 
     # Plot training curves
-    print("\n" + "="*80)
-    print("TRAINING COMPLETE")
-    print("="*80)
+    print("\n" + "="*80, flush=True)
+    print("TRAINING COMPLETE", flush=True)
+    print("="*80, flush=True)
     plot_training_curves(train_losses, val_losses, CHECKPOINT_DIR / "training_curves.png")
 
-    print(f"\nBest validation loss: {best_val_loss:.4f}")
-    print(f"Model saved to: {CHECKPOINT_DIR / 'best_model.pt'}")
+    print(f"\nBest validation loss: {best_val_loss:.4f}", flush=True)
+    print(f"Model saved to: {CHECKPOINT_DIR / 'best_model.pt'}", flush=True)
 
 
 if __name__ == '__main__':
