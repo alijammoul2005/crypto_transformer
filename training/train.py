@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 from pathlib import Path
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -33,10 +34,12 @@ np.random.seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 
-# Hyperparameters
-BATCH_SIZE = 256
+# Hyperparameters - Optimized for RTX 4060 (8GB VRAM)
+BATCH_SIZE = 64  # Reduced to fit in 8GB VRAM
+GRADIENT_ACCUMULATION_STEPS = 4  # Simulates effective batch size of 256
+EFFECTIVE_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS  # 256
 MAX_EPOCHS = 20
-WARMUP_STEPS = 4000  # Larger batch size needs longer warmup
+WARMUP_STEPS = 4000  # Based on effective batch size
 D_MODEL = 512  # Increased from 256 for more capacity
 NUM_HEADS = 8
 NUM_LAYERS = 6  # Increased from 4 for deeper model
@@ -44,6 +47,7 @@ D_FF = 2048  # Increased for better GPU utilization
 DROPOUT = 0.1
 MAX_LEN = 202
 EARLY_STOPPING_PATIENCE = 3
+USE_MIXED_PRECISION = True  # FP16 training to save memory (~40% reduction)
 
 # Paths - use relative paths for local training
 SCRIPT_DIR = Path(__file__).parent.parent  # crypto_transformer directory
@@ -116,9 +120,9 @@ def calculate_accuracy(logits, targets, pad_idx):
     return 100.0 * correct / total
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, pad_idx, epoch):
+def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, pad_idx, epoch, scaler):
     """
-    Train for one epoch.
+    Train for one epoch with gradient accumulation and mixed precision.
 
     Args:
         model: Transformer model
@@ -129,6 +133,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, pad_
         device: Device (cuda or cpu)
         pad_idx: PAD token index
         epoch: Current epoch number
+        scaler: GradScaler for mixed precision
 
     Returns:
         Average loss for epoch
@@ -154,32 +159,40 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, pad_
         # Create masks
         src_mask, tgt_mask = create_masks(src, tgt_input, pad_idx)
 
-        # Forward pass
-        logits = model(src, tgt_input, src_mask, tgt_mask)
+        # Forward pass with mixed precision
+        with autocast(enabled=USE_MIXED_PRECISION and torch.cuda.is_available()):
+            logits = model(src, tgt_input, src_mask, tgt_mask)
+            loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
+            # Scale loss for gradient accumulation
+            loss = loss / GRADIENT_ACCUMULATION_STEPS
 
-        # Calculate loss
-        loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
+        # Backward pass with gradient scaling
+        scaler.scale(loss).backward()
 
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        scheduler.step()
+        # Update weights every GRADIENT_ACCUMULATION_STEPS
+        if (batch_idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            scheduler.step()
 
         # Calculate accuracy
-        accuracy = calculate_accuracy(logits, tgt_output, pad_idx)
+        with torch.no_grad():
+            accuracy = calculate_accuracy(logits, tgt_output, pad_idx)
 
-        # Update statistics
-        total_loss += loss.item()
+        # Update statistics (use unscaled loss)
+        total_loss += loss.item() * GRADIENT_ACCUMULATION_STEPS
         total_accuracy += accuracy
         num_batches += 1
 
         # Update progress bar
         progress_bar.set_postfix({
-            'loss': f'{loss.item():.4f}',
+            'loss': f'{loss.item() * GRADIENT_ACCUMULATION_STEPS:.4f}',
             'acc': f'{accuracy:.2f}%',
-            'lr': f'{scheduler.get_lr():.6f}'
+            'lr': f'{scheduler.get_lr():.6f}',
+            'mem': f'{torch.cuda.memory_allocated()/1e9:.1f}GB' if torch.cuda.is_available() else 'N/A'
         })
 
         # Log every 100 steps
@@ -192,6 +205,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, pad_
         if batch_idx == 0 and epoch == 1 and torch.cuda.is_available():
             print(f"  After first step - Memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB", flush=True)
             print(f"  After first step - Memory reserved:  {torch.cuda.memory_reserved()/1e9:.2f} GB", flush=True)
+            print(f"  Peak memory:      {torch.cuda.max_memory_allocated()/1e9:.2f} GB", flush=True)
 
     return total_loss / num_batches, total_accuracy / num_batches
 
@@ -280,10 +294,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nDevice: {device}", flush=True)
     if torch.cuda.is_available():
-        print(f"GPUs available: {torch.cuda.device_count()}", flush=True)
-        print(f"GPU 0: {torch.cuda.get_device_name(0)}", flush=True)
+        print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
+        gpu_props = torch.cuda.get_device_properties(0)
+        print(f"Total VRAM: {gpu_props.total_memory / 1e9:.2f} GB", flush=True)
+        print(f"CUDA Capability: {gpu_props.major}.{gpu_props.minor}", flush=True)
         print(f"Memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB", flush=True)
         print(f"Memory reserved:  {torch.cuda.memory_reserved()/1e9:.2f} GB", flush=True)
+    print(f"\nBatch size: {BATCH_SIZE}", flush=True)
+    print(f"Gradient accumulation steps: {GRADIENT_ACCUMULATION_STEPS}", flush=True)
+    print(f"Effective batch size: {EFFECTIVE_BATCH_SIZE}", flush=True)
+    print(f"Mixed precision (FP16): {USE_MIXED_PRECISION}", flush=True)
     print(flush=True)
 
     # Load datasets
@@ -326,6 +346,9 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
     scheduler = WarmupScheduler(optimizer, D_MODEL, WARMUP_STEPS)
 
+    # Create GradScaler for mixed precision training
+    scaler = GradScaler(enabled=USE_MIXED_PRECISION and torch.cuda.is_available())
+
     # Check for existing checkpoint to resume from
     resume_checkpoint = CHECKPOINT_DIR / "best_model.pt"
     start_epoch = 1
@@ -335,21 +358,24 @@ def main():
         print("Loading checkpoint...", flush=True)
         checkpoint = torch.load(resume_checkpoint, map_location='cpu')
 
-        # Load state dict into model BEFORE wrapping with DataParallel
+        # Load state dict
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scaler_state_dict' in checkpoint and USE_MIXED_PRECISION:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_loss = checkpoint['val_loss']
 
         print(f"Resumed from epoch {checkpoint['epoch']}, best val_loss: {best_val_loss:.4f}", flush=True)
 
-    # Enable multi-GPU if available (AFTER loading checkpoint)
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs", flush=True)
-        model = nn.DataParallel(model)
+    # Move model to device (single GPU optimized for RTX 4060)
     model = model.to(device)
 
-    print(f"Total parameters: {model.module.count_parameters() if isinstance(model, nn.DataParallel) else model.count_parameters():,}", flush=True)
+    print(f"Total parameters: {model.count_parameters():,}", flush=True)
+
+    # Print memory usage after model initialization
+    if torch.cuda.is_available():
+        print(f"Memory after model init: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated, {torch.cuda.memory_reserved()/1e9:.2f} GB reserved", flush=True)
 
     # Loss function (ignore PAD tokens, add label smoothing for better generalization)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, label_smoothing=0.1)
@@ -370,7 +396,7 @@ def main():
 
         # Train
         train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, scheduler, criterion, device, pad_idx, epoch
+            model, train_loader, optimizer, scheduler, criterion, device, pad_idx, epoch, scaler
         )
 
         # Validate
@@ -393,13 +419,16 @@ def main():
             checkpoint_path = CHECKPOINT_DIR / "best_model.pt"
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict(),
+                'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'val_accuracy': val_acc,
             }, checkpoint_path)
             print(f"  ✓ Best model saved (val_loss: {val_loss:.4f})", flush=True)
+            if torch.cuda.is_available():
+                print(f"  GPU memory: {torch.cuda.memory_allocated()/1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory/1e9:.2f} GB ({100*torch.cuda.memory_allocated()/torch.cuda.get_device_properties(0).total_memory:.1f}%)", flush=True)
 
         else:
             epochs_without_improvement += 1
