@@ -61,7 +61,7 @@ class MultiHeadAttention(nn.Module):
 
         # Apply mask if provided (set masked positions to large negative value)
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e9)
+            scores = scores.masked_fill(mask == 0, -1e4)
 
         # Softmax to get attention weights
         attn_weights = torch.softmax(scores, dim=-1)
