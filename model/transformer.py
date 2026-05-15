@@ -184,7 +184,9 @@ class DecoderLayer(nn.Module):
 
 class CryptoTransformer(nn.Module):
     """
-    Full Transformer model for substitution cipher cryptanalysis.
+    Full Transformer model for substitution cipher KEY prediction.
+
+    NEW APPROACH: Predicts the 26-letter substitution key instead of plaintext.
 
     Encoder-decoder architecture with:
     - Character-level embeddings
@@ -192,18 +194,21 @@ class CryptoTransformer(nn.Module):
     - Multi-head attention
     - Feed-forward networks
 
+    Input: ciphertext (200 chars)
+    Output: substitution key (26 letters)
+
     Args:
         vocab_size: Size of vocabulary (30 for a-z + space + special tokens)
         d_model: Model dimension (256)
-        num_heads: Number of attention heads (8)
+        num_heads: Number of attention heads (4)
         num_layers: Number of encoder/decoder layers (4)
-        d_ff: Feed-forward dimension (512)
-        max_len: Maximum sequence length (202)
+        d_ff: Feed-forward dimension (1024)
+        max_len: Maximum sequence length (201 for src, 28 for tgt)
         dropout: Dropout probability (0.1)
     """
 
-    def __init__(self, vocab_size=30, d_model=256, num_heads=8, num_layers=4,
-                 d_ff=512, max_len=202, dropout=0.1):
+    def __init__(self, vocab_size=30, d_model=256, num_heads=4, num_layers=4,
+                 d_ff=1024, max_len=201, dropout=0.1):
         super().__init__()
 
         self.d_model = d_model

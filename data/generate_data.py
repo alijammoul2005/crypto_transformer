@@ -119,14 +119,39 @@ def load_and_clean_corpus():
     return cleaned_corpus
 
 
+def key_to_string(key):
+    """
+    Convert key dictionary to 26-character string.
+
+    The string representation is: position i contains the plaintext letter
+    that cipher letter i decrypts to.
+
+    Args:
+        key: Dictionary mapping plaintext -> ciphertext
+
+    Returns:
+        26-character string where key_string[i] is the plaintext letter
+        that chr(ord('a') + i) decrypts to
+    """
+    # Create inverse mapping: ciphertext -> plaintext
+    inverse_key = {v: k for k, v in key.items()}
+
+    # Build key string: for each cipher letter a-z, what plaintext letter does it map to?
+    key_string = ''
+    for i in range(26):
+        cipher_char = chr(ord('a') + i)
+        plaintext_char = inverse_key.get(cipher_char, cipher_char)
+        key_string += plaintext_char
+
+    return key_string
+
+
 def generate_samples(corpus, num_samples, chunk_size=CHUNK_SIZE):
     """
-    Generate substitution cipher sample pairs.
+    Generate plaintext samples for substitution cipher training.
 
-    Each sample:
-    - Random chunk of text from corpus
-    - Fresh random substitution key
-    - Plaintext and corresponding ciphertext
+    Each sample contains only plaintext - keys will be generated fresh
+    during training in the dataset __getitem__ method.
 
     Args:
         corpus: Cleaned text corpus
@@ -134,7 +159,7 @@ def generate_samples(corpus, num_samples, chunk_size=CHUNK_SIZE):
         chunk_size: Length of each text chunk
 
     Returns:
-        List of dictionaries with 'plaintext' and 'ciphertext' keys
+        List of dictionaries with 'plaintext' key only
     """
     samples = []
     corpus_len = len(corpus)
@@ -148,13 +173,8 @@ def generate_samples(corpus, num_samples, chunk_size=CHUNK_SIZE):
         start_idx = random.randint(0, corpus_len - chunk_size)
         plaintext = corpus[start_idx:start_idx + chunk_size]
 
-        # Generate fresh random key for this sample
-        key = generate_key()
-        ciphertext = encrypt(plaintext, key)
-
         samples.append({
-            'plaintext': plaintext,
-            'ciphertext': ciphertext
+            'plaintext': plaintext
         })
 
     return samples
@@ -217,8 +237,20 @@ def main():
     print("Example sample:")
     print("="*80)
     example = train_samples[0]
-    print(f"Plaintext:  {example['plaintext'][:100]}...")
-    print(f"Ciphertext: {example['ciphertext'][:100]}...")
+    print(f"Plaintext: {example['plaintext'][:100]}...")
+    print("\nNote: Keys will be generated fresh during training for maximum diversity")
+
+    # Demonstrate key format
+    print("\n" + "="*80)
+    print("Key format example:")
+    print("="*80)
+    demo_key = generate_key()
+    demo_key_string = key_to_string(demo_key)
+    demo_cipher = encrypt(example['plaintext'][:50], demo_key)
+    print(f"Example key string: {demo_key_string}")
+    print(f"(26 chars, position i = plaintext for cipher letter a+i)")
+    print(f"\nOriginal: {example['plaintext'][:50]}")
+    print(f"Encrypted: {demo_cipher}")
 
 
 if __name__ == '__main__':

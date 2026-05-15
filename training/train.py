@@ -1,5 +1,7 @@
 """
-Training script for substitution cipher Transformer.
+Training script for substitution cipher KEY prediction Transformer.
+
+NEW APPROACH: Predict the 26-letter substitution key, then apply deterministically.
 
 Implements:
 - Teacher forcing training
@@ -7,6 +9,7 @@ Implements:
 - Early stopping
 - Model checkpointing
 - Progress logging
+- Fresh key generation per epoch for maximum diversity
 """
 
 import sys
@@ -34,20 +37,22 @@ np.random.seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 
-# Hyperparameters - Optimized for RTX 4060 (8GB VRAM)
-BATCH_SIZE = 64  # Reduced to fit in 8GB VRAM
-GRADIENT_ACCUMULATION_STEPS = 4  # Simulates effective batch size of 256
+# Hyperparameters - Optimized for Google Colab (T4 GPU ~15GB VRAM)
+BATCH_SIZE = 128  # Optimized for Colab T4 GPU
+GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 256
 EFFECTIVE_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS  # 256
 MAX_EPOCHS = 20
-WARMUP_STEPS = 4000  # Based on effective batch size
-D_MODEL = 512  # Increased from 256 for more capacity
-NUM_HEADS = 8
-NUM_LAYERS = 6  # Increased from 4 for deeper model
-D_FF = 2048  # Increased for better GPU utilization
+WARMUP_STEPS = 2000  # Faster warmup for simpler task
+D_MODEL = 256  # Efficient size for key prediction
+NUM_HEADS = 4
+NUM_LAYERS = 4
+D_FF = 1024
 DROPOUT = 0.1
-MAX_LEN = 202
-EARLY_STOPPING_PATIENCE = 3
+MAX_SRC_LEN = 201  # Ciphertext: 200 chars + EOS
+MAX_TGT_LEN = 28   # Key: SOS + 26 letters + EOS
+EARLY_STOPPING_PATIENCE = 5
 USE_MIXED_PRECISION = True  # FP16 training to save memory (~40% reduction)
+NUM_WORKERS = 2  # Colab has 2 CPU cores typically
 
 # Paths - use relative paths for local training
 SCRIPT_DIR = Path(__file__).parent.parent  # crypto_transformer directory
@@ -308,8 +313,8 @@ def main():
 
     # Load datasets
     print("Loading datasets...", flush=True)
-    train_dataset = CipherDataset(DATA_DIR / "train.json", max_len=MAX_LEN)
-    val_dataset = CipherDataset(DATA_DIR / "val.json", max_len=MAX_LEN)
+    train_dataset = CipherDataset(DATA_DIR / "train.json", max_src_len=MAX_SRC_LEN)
+    val_dataset = CipherDataset(DATA_DIR / "val.json", max_src_len=MAX_SRC_LEN)
 
     vocab_size = train_dataset.vocab_size
     pad_idx = train_dataset.PAD_IDX
@@ -320,8 +325,8 @@ def main():
     print(f"PAD_IDX: {pad_idx}", flush=True)
 
     # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
     print(f"Training batches: {len(train_loader)}", flush=True)
     print(f"Validation batches: {len(val_loader)}", flush=True)
@@ -332,13 +337,14 @@ def main():
 
     # Create model
     print("\nInitializing model...", flush=True)
+    print(f"Task: Predict 26-letter substitution key from ciphertext", flush=True)
     model = CryptoTransformer(
         vocab_size=vocab_size,
         d_model=D_MODEL,
         num_heads=NUM_HEADS,
         num_layers=NUM_LAYERS,
         d_ff=D_FF,
-        max_len=MAX_LEN,
+        max_len=max(MAX_SRC_LEN, MAX_TGT_LEN),
         dropout=DROPOUT
     )
 
@@ -377,8 +383,8 @@ def main():
     if torch.cuda.is_available():
         print(f"Memory after model init: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated, {torch.cuda.memory_reserved()/1e9:.2f} GB reserved", flush=True)
 
-    # Loss function (ignore PAD tokens, add label smoothing for better generalization)
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, label_smoothing=0.1)
+    # Loss function (ignore PAD tokens, NO label smoothing for exact key recovery)
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, label_smoothing=0.0)
 
     # Training loop
     print("\n" + "="*80, flush=True)

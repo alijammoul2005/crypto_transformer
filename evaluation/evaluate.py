@@ -1,16 +1,16 @@
 """
-Evaluation script for trained substitution cipher Transformer.
+Evaluation script for trained substitution cipher KEY prediction model.
 
-Loads the best checkpoint and evaluates on the test set.
-Reports all metrics and shows example predictions.
+Evaluates model on test set and reports:
+- Key accuracy (% of 26 letters correct)
+- Perfect key recovery rate (% with all 26 letters perfect)
+- Character accuracy (after applying predicted key)
+- Word accuracy (after applying predicted key)
 """
 
 import sys
 import os
 import torch
-import json
-import random
-from torch.utils.data import DataLoader
 from pathlib import Path
 from tqdm import tqdm
 
@@ -19,99 +19,78 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.dataset import CipherDataset
 from model.transformer import CryptoTransformer
-from evaluation.metrics import aggregate_metrics, calculate_all_metrics
+from evaluation.metrics import calculate_all_metrics, aggregate_metrics, apply_key
 
-# Set random seed
-random.seed(42)
-torch.manual_seed(42)
-
-# Paths - use relative paths for local execution
+# Paths
 SCRIPT_DIR = Path(__file__).parent.parent
 DATA_DIR = SCRIPT_DIR / "data" / "generated"
 CHECKPOINT_PATH = SCRIPT_DIR / "checkpoints" / "best_model.pt"
-RESULTS_DIR = SCRIPT_DIR / "evaluation_results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Model hyperparameters (must match training config)
-D_MODEL = 512
-NUM_HEADS = 8
-NUM_LAYERS = 6
-D_FF = 2048
-MAX_LEN = 202
+D_MODEL = 256
+NUM_HEADS = 4
+NUM_LAYERS = 4
+D_FF = 1024
+MAX_SRC_LEN = 201
+MAX_TGT_LEN = 28
 DROPOUT = 0.1
 
+# Evaluation settings
+NUM_TEST_SAMPLES = 1000  # Evaluate on subset for speed (set to None for full test set)
 
-def create_masks(src, tgt, pad_idx):
+
+def predict_key(model, src, dataset, device):
     """
-    Create attention masks for inference.
+    Predict substitution key from ciphertext.
 
     Args:
-        src: Source tensor (batch, src_seq_len)
-        tgt: Target tensor (batch, tgt_seq_len)
-        pad_idx: Index of PAD token
+        model: Trained transformer model
+        src: Source tensor (batch, max_src_len)
+        dataset: Dataset object (for decoding)
+        device: Device (cuda or cpu)
 
     Returns:
-        src_mask: Padding mask for source
-        tgt_mask: Causal mask for target
-    """
-    # Source padding mask
-    src_mask = (src != pad_idx).unsqueeze(1).unsqueeze(2)
-
-    # Target causal mask
-    tgt_seq_len = tgt.size(1)
-    tgt_causal_mask = torch.tril(torch.ones(tgt_seq_len, tgt_seq_len, device=tgt.device)).bool()
-    tgt_causal_mask = tgt_causal_mask.unsqueeze(0).unsqueeze(0)
-
-    # Target padding mask
-    tgt_padding_mask = (tgt != pad_idx).unsqueeze(1)
-    tgt_mask = tgt_causal_mask & tgt_padding_mask.unsqueeze(3)
-
-    return src_mask, tgt_mask
-
-
-def greedy_decode(model, src, src_mask, dataset, device, max_len=MAX_LEN):
-    """
-    Greedy decoding for inference.
-
-    Args:
-        model: Trained model
-        src: Source tensor (batch, src_seq_len)
-        src_mask: Source mask
-        dataset: Dataset object (for token indices)
-        device: Device
-        max_len: Maximum decoding length
-
-    Returns:
-        Decoded predictions (batch, seq_len)
+        List of predicted key strings (batch_size,)
     """
     model.eval()
     batch_size = src.size(0)
 
-    # Encode source
-    encoder_output = model.encode(src, src_mask)
+    with torch.no_grad():
+        # Create source mask
+        src_mask = (src != dataset.PAD_IDX).unsqueeze(1).unsqueeze(2)
 
-    # Start with SOS token
-    tgt = torch.full((batch_size, 1), dataset.SOS_IDX, dtype=torch.long, device=device)
+        # Encode
+        encoder_output = model.encode(src, src_mask)
 
-    for _ in range(max_len - 1):
-        # Create target mask
-        tgt_mask = torch.tril(torch.ones(tgt.size(1), tgt.size(1), device=device)).bool()
-        tgt_mask = tgt_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1)
+        # Decode key autoregressively (fixed length: 26 letters)
+        tgt = torch.full((batch_size, 1), dataset.SOS_IDX, dtype=torch.long, device=device)
 
-        # Decode
-        logits = model(src, tgt, src_mask, tgt_mask)
+        for _ in range(26):  # Predict exactly 26 letters
+            # Create causal mask
+            tgt_mask = torch.tril(torch.ones(tgt.size(1), tgt.size(1), device=device)).bool()
+            tgt_mask = tgt_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, -1, -1, -1)
 
-        # Get next token (greedy)
-        next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            # Decode
+            logits = model(src, tgt, src_mask, tgt_mask)
 
-        # Append to target
-        tgt = torch.cat([tgt, next_token], dim=1)
+            # Get next token
+            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
-        # Stop if all sequences have EOS
-        if (next_token == dataset.EOS_IDX).all():
-            break
+            # Append
+            tgt = torch.cat([tgt, next_token], dim=1)
 
-    return tgt
+    # Decode to text (batch)
+    predicted_keys = []
+    for i in range(batch_size):
+        key_string = dataset.decode(tgt[i])
+        # Ensure exactly 26 letters
+        if len(key_string) < 26:
+            key_string = key_string + 'a' * (26 - len(key_string))
+        else:
+            key_string = key_string[:26]
+        predicted_keys.append(key_string)
+
+    return predicted_keys
 
 
 def evaluate_model(model, dataloader, dataset, device):
@@ -119,74 +98,62 @@ def evaluate_model(model, dataloader, dataset, device):
     Evaluate model on test set.
 
     Args:
-        model: Trained model
+        model: Trained transformer model
         dataloader: Test data loader
         dataset: Dataset object
-        device: Device
+        device: Device (cuda or cpu)
 
     Returns:
-        all_predictions: List of predicted strings
-        all_targets: List of target strings
-        all_ciphertexts: List of ciphertext strings
+        Dictionary with aggregate metrics
     """
     model.eval()
+    all_metrics = []
 
-    all_predictions = []
-    all_targets = []
-    all_ciphertexts = []
+    print("\nEvaluating model on test set...")
+    print("="*80)
 
     with torch.no_grad():
         for src, tgt in tqdm(dataloader, desc="Evaluating"):
             src = src.to(device)
+            tgt = tgt.to(device)
 
-            # Create source mask
-            src_mask = (src != dataset.PAD_IDX).unsqueeze(1).unsqueeze(2)
+            batch_size = src.size(0)
 
-            # Greedy decode
-            predictions = greedy_decode(model, src, src_mask, dataset, device)
+            # Decode true keys (skip SOS)
+            true_keys = []
+            for i in range(batch_size):
+                key_string = dataset.decode(tgt[i])
+                if len(key_string) < 26:
+                    key_string = key_string + 'a' * (26 - len(key_string))
+                else:
+                    key_string = key_string[:26]
+                true_keys.append(key_string)
 
-            # Decode predictions and targets
-            for i in range(src.size(0)):
-                pred_text = dataset.decode(predictions[i])
-                target_text = dataset.decode(tgt[i])
-                cipher_text = dataset.decode(src[i])
+            # Predict keys
+            predicted_keys = predict_key(model, src, dataset, device)
 
-                all_predictions.append(pred_text)
-                all_targets.append(target_text)
-                all_ciphertexts.append(cipher_text)
+            # Evaluate each sample in batch
+            for i in range(batch_size):
+                # Decode ciphertext
+                ciphertext = dataset.decode(src[i])
 
-    return all_predictions, all_targets, all_ciphertexts
+                # Get keys
+                true_key = true_keys[i]
+                predicted_key = predicted_keys[i]
 
+                # For true plaintext, decrypt using true key
+                true_plaintext = apply_key(ciphertext, true_key)
 
-def print_examples(predictions, targets, ciphertexts, num_examples=10):
-    """
-    Print random example predictions.
+                # Calculate metrics
+                metrics = calculate_all_metrics(
+                    predicted_key, true_key, ciphertext, true_plaintext
+                )
+                all_metrics.append(metrics)
 
-    Args:
-        predictions: List of predicted strings
-        targets: List of target strings
-        ciphertexts: List of ciphertext strings
-        num_examples: Number of examples to print
-    """
-    print("\n" + "="*80)
-    print("EXAMPLE PREDICTIONS")
-    print("="*80)
+    # Aggregate metrics
+    agg = aggregate_metrics(all_metrics)
 
-    # Sample random indices
-    indices = random.sample(range(len(predictions)), min(num_examples, len(predictions)))
-
-    for i, idx in enumerate(indices, 1):
-        cipher = ciphertexts[idx]
-        pred = predictions[idx]
-        target = targets[idx]
-
-        # Calculate character accuracy for this example
-        char_acc = calculate_all_metrics(pred, target)['character_accuracy']
-
-        print(f"\n--- Example {i} (Char Accuracy: {char_acc:.2f}%) ---")
-        print(f"Ciphertext: {cipher[:100]}{'...' if len(cipher) > 100 else ''}")
-        print(f"Predicted:  {pred[:100]}{'...' if len(pred) > 100 else ''}")
-        print(f"Target:     {target[:100]}{'...' if len(target) > 100 else ''}")
+    return agg, all_metrics
 
 
 def main():
@@ -194,31 +161,43 @@ def main():
     Main evaluation function.
     """
     print("="*80)
-    print("EVALUATING SUBSTITUTION CIPHER TRANSFORMER")
+    print("EVALUATING SUBSTITUTION CIPHER KEY PREDICTION MODEL")
     print("="*80)
 
-    # Check device
+    # Check GPU availability
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}\n")
+    print(f"\nDevice: {device}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print()
 
     # Load test dataset
     print("Loading test dataset...")
-    test_dataset = CipherDataset(DATA_DIR / "test.json", max_len=MAX_LEN)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    test_dataset = CipherDataset(DATA_DIR / "test.json", max_src_len=MAX_SRC_LEN)
+
+    # Limit to NUM_TEST_SAMPLES if specified
+    if NUM_TEST_SAMPLES is not None:
+        print(f"Evaluating on {NUM_TEST_SAMPLES} samples (for speed)")
+        # Create subset
+        test_dataset.data = test_dataset.data[:NUM_TEST_SAMPLES]
 
     vocab_size = test_dataset.vocab_size
     print(f"Test samples: {len(test_dataset)}")
-    print(f"Vocabulary size: {vocab_size}\n")
+    print(f"Vocabulary size: {vocab_size}")
 
-    # Load model
-    print("Loading model...")
+    # Create data loader
+    from torch.utils.data import DataLoader
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=2)
+
+    # Create model
+    print("\nLoading model...")
     model = CryptoTransformer(
         vocab_size=vocab_size,
         d_model=D_MODEL,
         num_heads=NUM_HEADS,
         num_layers=NUM_LAYERS,
         d_ff=D_FF,
-        max_len=MAX_LEN,
+        max_len=max(MAX_SRC_LEN, MAX_TGT_LEN),
         dropout=DROPOUT
     ).to(device)
 
@@ -226,42 +205,37 @@ def main():
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
-    print(f"Checkpoint val loss: {checkpoint['val_loss']:.4f}\n")
+    print(f"Training val loss: {checkpoint['val_loss']:.4f}")
 
     # Evaluate
-    print("Running evaluation on test set...")
-    predictions, targets, ciphertexts = evaluate_model(model, test_loader, test_dataset, device)
+    agg, all_metrics = evaluate_model(model, test_loader, test_dataset, device)
 
-    # Calculate metrics
+    # Print results
     print("\n" + "="*80)
-    print("EVALUATION METRICS")
+    print("EVALUATION RESULTS")
+    print("="*80)
+    print(f"Key Accuracy:              {agg['key_accuracy']:.2f}%")
+    print(f"Perfect Key Recovery Rate: {agg['perfect_key_recovery_rate']:.2f}%")
+    print(f"Character Accuracy:        {agg['character_accuracy']:.2f}%")
+    print(f"Word Accuracy:             {agg['word_accuracy']:.2f}%")
+
+    # Show some examples
+    print("\n" + "="*80)
+    print("EXAMPLE PREDICTIONS (first 5)")
     print("="*80)
 
-    metrics = aggregate_metrics(predictions, targets)
+    for i in range(min(5, len(all_metrics))):
+        metrics = all_metrics[i]
+        print(f"\nExample {i+1}:")
+        print(f"  Key accuracy:       {metrics['key_accuracy']:.2f}%")
+        print(f"  Perfect key:        {'✓' if metrics['perfect_key_recovery'] == 1.0 else '✗'}")
+        print(f"  Character accuracy: {metrics['character_accuracy']:.2f}%")
+        if len(metrics['predicted_plaintext']) > 0:
+            print(f"  Decrypted text:     {metrics['predicted_plaintext'][:80]}...")
 
-    print(f"\nCharacter Accuracy: {metrics['character_accuracy']:.2f}%")
-    print(f"Word Accuracy:      {metrics['word_accuracy']:.2f}%")
-    print(f"BLEU Score:         {metrics['bleu_score']:.4f}")
-    print(f"Mean Edit Distance: {metrics['mean_edit_distance']:.2f}")
-
-    # Print examples
-    print_examples(predictions, targets, ciphertexts, num_examples=10)
-
-    # Save results
-    results = {
-        'metrics': metrics,
-        'num_samples': len(predictions),
-        'checkpoint_epoch': int(checkpoint['epoch']),
-        'checkpoint_val_loss': float(checkpoint['val_loss'])
-    }
-
-    results_path = RESULTS_DIR / "results.json"
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2)
-
-    print(f"\n{'='*80}")
-    print(f"Results saved to {results_path}")
-    print(f"{'='*80}")
+    print("\n" + "="*80)
+    print("EVALUATION COMPLETE!")
+    print("="*80)
 
 
 if __name__ == '__main__':

@@ -1,39 +1,95 @@
 """
-Evaluation metrics for substitution cipher decryption.
+Evaluation metrics for substitution cipher KEY prediction.
+
+NEW APPROACH: Metrics focused on key accuracy and decryption quality.
 
 Implements:
-- Character accuracy
-- Word accuracy
-- BLEU score
-- Mean edit distance (Levenshtein distance)
+- Key accuracy (% of 26 letters correct)
+- Perfect key recovery rate (all 26 letters correct)
+- Character accuracy (apply key to decrypt, compare to plaintext)
+- Word accuracy (after applying key)
 """
 
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-import Levenshtein
 
-
-def character_accuracy(predicted, target):
+def key_accuracy(predicted_key, true_key):
     """
-    Calculate character-level accuracy.
-
-    Measures percentage of characters correctly predicted.
+    Calculate percentage of key letters correctly predicted.
 
     Args:
-        predicted: Predicted plaintext string
-        target: True plaintext string
+        predicted_key: Predicted 26-letter key string
+        true_key: True 26-letter key string
 
     Returns:
         Accuracy as percentage (0-100)
     """
-    if len(target) == 0:
-        return 100.0 if len(predicted) == 0 else 0.0
+    if len(predicted_key) != 26 or len(true_key) != 26:
+        return 0.0
+
+    correct = sum(1 for i in range(26) if predicted_key[i] == true_key[i])
+    return 100.0 * correct / 26
+
+
+def perfect_key_recovery(predicted_key, true_key):
+    """
+    Check if all 26 letters of the key are correctly predicted.
+
+    Args:
+        predicted_key: Predicted 26-letter key string
+        true_key: True 26-letter key string
+
+    Returns:
+        1.0 if perfect match, 0.0 otherwise
+    """
+    return 1.0 if predicted_key == true_key else 0.0
+
+
+def apply_key(ciphertext, key_string):
+    """
+    Apply substitution key to decrypt ciphertext.
+
+    Args:
+        ciphertext: Encrypted text string
+        key_string: 26-character key where key_string[i] is the plaintext
+                   letter that cipher letter chr(ord('a') + i) decrypts to
+
+    Returns:
+        Decrypted plaintext string
+    """
+    if len(key_string) != 26:
+        return ""
+
+    # Build decryption mapping
+    decryption_map = {}
+    for i in range(26):
+        cipher_char = chr(ord('a') + i)
+        plain_char = key_string[i]
+        decryption_map[cipher_char] = plain_char
+
+    # Decrypt
+    plaintext = ''.join(decryption_map.get(char, char) for char in ciphertext)
+    return plaintext
+
+
+def character_accuracy(predicted_plaintext, true_plaintext):
+    """
+    Calculate character-level accuracy after decryption.
+
+    Args:
+        predicted_plaintext: Decrypted text using predicted key
+        true_plaintext: True plaintext
+
+    Returns:
+        Accuracy as percentage (0-100)
+    """
+    if len(true_plaintext) == 0:
+        return 100.0 if len(predicted_plaintext) == 0 else 0.0
 
     # Ensure same length for comparison
-    min_len = min(len(predicted), len(target))
-    max_len = max(len(predicted), len(target))
+    min_len = min(len(predicted_plaintext), len(true_plaintext))
+    max_len = max(len(predicted_plaintext), len(true_plaintext))
 
     # Count matching characters
-    correct = sum(1 for i in range(min_len) if predicted[i] == target[i])
+    correct = sum(1 for i in range(min_len) if predicted_plaintext[i] == true_plaintext[i])
 
     # Accuracy as percentage
     accuracy = 100.0 * correct / max_len
@@ -41,145 +97,91 @@ def character_accuracy(predicted, target):
     return accuracy
 
 
-def word_accuracy(predicted, target):
+def word_accuracy(predicted_plaintext, true_plaintext):
     """
-    Calculate word-level accuracy.
-
-    Measures percentage of complete words correctly recovered.
+    Calculate word-level accuracy after decryption.
 
     Args:
-        predicted: Predicted plaintext string
-        target: True plaintext string
+        predicted_plaintext: Decrypted text using predicted key
+        true_plaintext: True plaintext
 
     Returns:
         Accuracy as percentage (0-100)
     """
-    pred_words = predicted.split()
-    target_words = target.split()
+    pred_words = predicted_plaintext.split()
+    true_words = true_plaintext.split()
 
-    if len(target_words) == 0:
+    if len(true_words) == 0:
         return 100.0 if len(pred_words) == 0 else 0.0
 
     # Count correctly predicted words
-    # Align by position for fair comparison
-    min_len = min(len(pred_words), len(target_words))
-    correct_words = sum(1 for i in range(min_len) if pred_words[i] == target_words[i])
+    min_len = min(len(pred_words), len(true_words))
+    correct_words = sum(1 for i in range(min_len) if pred_words[i] == true_words[i])
 
     # Accuracy based on total target words
-    accuracy = 100.0 * correct_words / len(target_words)
+    accuracy = 100.0 * correct_words / len(true_words)
 
     return accuracy
 
 
-def bleu_score(predicted, target):
+def calculate_all_metrics(predicted_key, true_key, ciphertext, true_plaintext):
     """
-    Calculate BLEU score.
-
-    Uses NLTK's sentence_bleu with smoothing for short sequences.
+    Calculate all evaluation metrics for key prediction.
 
     Args:
-        predicted: Predicted plaintext string
-        target: True plaintext string
-
-    Returns:
-        BLEU score (0-1)
-    """
-    # Tokenize by characters for character-level BLEU
-    pred_tokens = list(predicted)
-    target_tokens = list(target)
-
-    if len(target_tokens) == 0:
-        return 1.0 if len(pred_tokens) == 0 else 0.0
-
-    # Use smoothing function for short sequences
-    smoothing = SmoothingFunction().method1
-
-    # Calculate BLEU score
-    # target should be a list of reference translations
-    score = sentence_bleu([target_tokens], pred_tokens, smoothing_function=smoothing)
-
-    return score
-
-
-def mean_edit_distance(predicted, target):
-    """
-    Calculate Levenshtein edit distance.
-
-    Measures minimum number of single-character edits needed to transform
-    predicted string into target string.
-
-    Args:
-        predicted: Predicted plaintext string
-        target: True plaintext string
-
-    Returns:
-        Edit distance (integer)
-    """
-    return Levenshtein.distance(predicted, target)
-
-
-def calculate_all_metrics(predicted, target):
-    """
-    Calculate all evaluation metrics.
-
-    Args:
-        predicted: Predicted plaintext string
-        target: True plaintext string
+        predicted_key: Predicted 26-letter key string
+        true_key: True 26-letter key string
+        ciphertext: Encrypted text
+        true_plaintext: True plaintext
 
     Returns:
         Dictionary with all metrics
     """
-    metrics = {
-        'character_accuracy': character_accuracy(predicted, target),
-        'word_accuracy': word_accuracy(predicted, target),
-        'bleu_score': bleu_score(predicted, target),
-        'edit_distance': mean_edit_distance(predicted, target)
+    # Key metrics
+    key_acc = key_accuracy(predicted_key, true_key)
+    perfect_key = perfect_key_recovery(predicted_key, true_key)
+
+    # Apply predicted key to decrypt
+    predicted_plaintext = apply_key(ciphertext, predicted_key)
+
+    # Decryption quality metrics
+    char_acc = character_accuracy(predicted_plaintext, true_plaintext)
+    word_acc = word_accuracy(predicted_plaintext, true_plaintext)
+
+    return {
+        'key_accuracy': key_acc,
+        'perfect_key_recovery': perfect_key,
+        'character_accuracy': char_acc,
+        'word_accuracy': word_acc,
+        'predicted_plaintext': predicted_plaintext
     }
 
-    return metrics
 
-
-def aggregate_metrics(all_predictions, all_targets):
+def aggregate_metrics(all_metrics):
     """
     Calculate aggregate metrics across multiple samples.
 
     Args:
-        all_predictions: List of predicted plaintext strings
-        all_targets: List of true plaintext strings
+        all_metrics: List of metric dictionaries from calculate_all_metrics
 
     Returns:
         Dictionary with averaged metrics
     """
-    if len(all_predictions) != len(all_targets):
-        raise ValueError("Number of predictions must match number of targets")
-
-    if len(all_predictions) == 0:
+    if len(all_metrics) == 0:
         return {
+            'key_accuracy': 0.0,
+            'perfect_key_recovery_rate': 0.0,
             'character_accuracy': 0.0,
-            'word_accuracy': 0.0,
-            'bleu_score': 0.0,
-            'mean_edit_distance': 0.0
+            'word_accuracy': 0.0
         }
 
-    total_char_acc = 0.0
-    total_word_acc = 0.0
-    total_bleu = 0.0
-    total_edit_dist = 0.0
-
-    for pred, target in zip(all_predictions, all_targets):
-        metrics = calculate_all_metrics(pred, target)
-        total_char_acc += metrics['character_accuracy']
-        total_word_acc += metrics['word_accuracy']
-        total_bleu += metrics['bleu_score']
-        total_edit_dist += metrics['edit_distance']
-
-    n = len(all_predictions)
+    n = len(all_metrics)
 
     return {
-        'character_accuracy': total_char_acc / n,
-        'word_accuracy': total_word_acc / n,
-        'bleu_score': total_bleu / n,
-        'mean_edit_distance': total_edit_dist / n
+        'key_accuracy': sum(m['key_accuracy'] for m in all_metrics) / n,
+        'perfect_key_recovery_rate': sum(m['perfect_key_recovery'] for m in all_metrics) / n * 100,
+        'character_accuracy': sum(m['character_accuracy'] for m in all_metrics) / n,
+        'word_accuracy': sum(m['word_accuracy'] for m in all_metrics) / n
     }
 
 
@@ -187,30 +189,48 @@ def test_metrics():
     """
     Test function for evaluation metrics.
     """
-    # Test cases
-    test_cases = [
-        ("hello world", "hello world", "Perfect match"),
-        ("hello world", "hello worlx", "One character off"),
-        ("hello world", "hallo world", "One substitution"),
-        ("hello world", "world hello", "Word order changed"),
-        ("", "", "Both empty"),
-        ("hello", "hello there", "Target longer"),
-    ]
-
-    print("Testing evaluation metrics:")
+    print("Testing key prediction metrics:")
     print("="*80)
 
-    for pred, target, description in test_cases:
-        print(f"\n{description}:")
-        print(f"  Predicted: '{pred}'")
-        print(f"  Target:    '{target}'")
+    # Test case 1: Perfect key prediction
+    true_key = "bcdefghijklmnopqrstuvwxyza"
+    predicted_key = "bcdefghijklmnopqrstuvwxyza"
+    ciphertext = "ifmmp xpsme"
+    true_plaintext = "hello world"
 
-        metrics = calculate_all_metrics(pred, target)
+    print("\nTest 1: Perfect key prediction")
+    print(f"True key:      {true_key}")
+    print(f"Predicted key: {predicted_key}")
+    print(f"Ciphertext:    {ciphertext}")
+    print(f"True plaintext: {true_plaintext}")
 
-        print(f"  Character Accuracy: {metrics['character_accuracy']:.2f}%")
-        print(f"  Word Accuracy:      {metrics['word_accuracy']:.2f}%")
-        print(f"  BLEU Score:         {metrics['bleu_score']:.4f}")
-        print(f"  Edit Distance:      {metrics['edit_distance']}")
+    metrics = calculate_all_metrics(predicted_key, true_key, ciphertext, true_plaintext)
+    print(f"Key accuracy:          {metrics['key_accuracy']:.2f}%")
+    print(f"Perfect key recovery:  {metrics['perfect_key_recovery']}")
+    print(f"Character accuracy:    {metrics['character_accuracy']:.2f}%")
+    print(f"Word accuracy:         {metrics['word_accuracy']:.2f}%")
+    print(f"Decrypted:             {metrics['predicted_plaintext']}")
+
+    # Test case 2: Partial key prediction (23/26 correct)
+    predicted_key_partial = "bcdefghijklmnopqrstuvwxyzz"  # Last letter wrong
+
+    print("\nTest 2: Partial key prediction (25/26 correct)")
+    print(f"True key:      {true_key}")
+    print(f"Predicted key: {predicted_key_partial}")
+
+    metrics2 = calculate_all_metrics(predicted_key_partial, true_key, ciphertext, true_plaintext)
+    print(f"Key accuracy:          {metrics2['key_accuracy']:.2f}%")
+    print(f"Perfect key recovery:  {metrics2['perfect_key_recovery']}")
+    print(f"Character accuracy:    {metrics2['character_accuracy']:.2f}%")
+    print(f"Decrypted:             {metrics2['predicted_plaintext']}")
+
+    # Test case 3: Aggregation
+    print("\nTest 3: Aggregate metrics")
+    all_metrics = [metrics, metrics2]
+    agg = aggregate_metrics(all_metrics)
+    print(f"Average key accuracy:         {agg['key_accuracy']:.2f}%")
+    print(f"Perfect key recovery rate:    {agg['perfect_key_recovery_rate']:.2f}%")
+    print(f"Average character accuracy:   {agg['character_accuracy']:.2f}%")
 
 
 if __name__ == '__main__':
